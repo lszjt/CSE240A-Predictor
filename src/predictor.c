@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "predictor.h"
-#include <math.h>
 
 //
 // TODO:Student Information
@@ -39,8 +38,11 @@ int verbose;
 //TODO: Add your own Branch Predictor data structures here
 //
 
-int *BHT;
-int History;
+int *BHT_global;
+int History;//global history
+int *PHT_map;//local history
+int *PHT;
+int *Choice;//choice predictor
 
 //------------------------------------//
 //        Predictor Functions         //
@@ -54,13 +56,28 @@ init_predictor()
   //
   //TODO: Initialize Branch Predictor Data Structures
   //
+
+  //initialize global history table
   History = 0;
-  size_t size = pow(2, ghistoryBits);
-  BHT = (int *)malloc(size * sizeof(uint32_t));
-  for(int i = 0; i < size; i++) {
-    *(BHT + i) = WN;
+  BHT_global = (int *)malloc((1 << ghistoryBits) * sizeof(int));
+  for(int i = 0; i < (1 << ghistoryBits); i++) {
+    *(BHT_global + i) = WN;
   }
   
+  //initialize local history table
+  PHT_map = (int *)malloc((1 << pcIndexBits) * sizeof(int));
+  for(int i = 0; i < (1 << pcIndexBits); i++) {
+    *(PHT_map + i) = 0;
+  }
+  PHT = (int *)malloc((1 << pcIndexBits) * sizeof(int));
+  for(int i = 0; i < (1 << pcIndexBits); i++) {
+    *(PHT + i) = WN;
+  }
+
+  Choice = (int *)malloc((1 << ghistoryBits) * sizeof(int));
+  for(int i = 0; i < (1 << ghistoryBits); i++) {
+    *(Choice + i) = WN;
+  }
 }
 
 // Make a prediction for conditional branch instruction at PC 'pc'
@@ -74,11 +91,68 @@ GSHARE_make(uint32_t pc) {
     mask =  (mask << 1) + 1;
   }
   uint32_t index = (pc & mask) ^ (History & mask);
-  if(*(BHT + index) >= WT) {
+  if(*(BHT_global + index) >= WT) {
     return TAKEN;
   }
   else {
     return NOTTAKEN;
+  }
+}
+
+uint8_t
+Local_make(uint32_t pc) {
+  uint32_t mask = 0;
+  for(int i = 0; i < pcIndexBits; i++) {
+    mask =  (mask << 1) + 1;
+  }
+  uint32_t index = pc & mask;
+  if(*(PHT + *(PHT_map + index)) >= WT) {
+    return TAKEN;
+  }
+  else {
+    return NOTTAKEN;
+  }
+}
+
+uint8_t
+Global_make() {
+  uint32_t mask = 0;
+  for(int i = 0; i < ghistoryBits; i++) {
+    mask =  (mask << 1) + 1;
+  }
+  uint32_t index = History & mask;
+  if(*(BHT_global + index) >= WT) {
+    return TAKEN;
+  }
+  else {
+    return NOTTAKEN;
+  }
+}
+
+uint8_t
+Choice_make() {
+  uint32_t mask = 0;
+  for(int i = 0; i < ghistoryBits; i++) {
+    mask =  (mask << 1) + 1;
+  }
+  uint32_t index = History & mask;
+  if(*(Choice + index) >= WT) {
+    return 1;
+  }
+  else {
+    return 0;
+  }
+}
+
+uint8_t
+TOURNAMENT_make(uint32_t pc) {
+  uint8_t Local_result = Local_make(pc);
+  uint8_t Global_result = Global_make();
+  if(Choice_make()) {
+    return Local_result;
+  }
+  else {
+    return Global_result;
   }
 }
 
@@ -95,6 +169,7 @@ make_prediction(uint32_t pc)
     case GSHARE:
       return GSHARE_make(pc);
     case TOURNAMENT:
+      return TOURNAMENT_make(pc);
     case CUSTOM:
     default:
       break;
@@ -118,15 +193,97 @@ GSHARE_train(uint32_t pc, uint8_t outcome) {
   }
   uint32_t index = (pc & mask) ^ (History & mask);
   if(outcome == TAKEN) {
-    if(*(BHT + index) < ST) {
-      *(BHT + index) += 1;
+    if(*(BHT_global + index) < ST) {
+      *(BHT_global + index) += 1;
     }
   }
   else {
-    if(*(BHT + index) > SN) {
-      *(BHT + index) -= 1;
+    if(*(BHT_global + index) > SN) {
+      *(BHT_global + index) -= 1;
     }
   }
+  History = (History << 1) + outcome;
+  return;
+}
+
+void
+Local_train(uint32_t pc, uint8_t outcome) {
+  //train local BHT
+  uint32_t mask = 0;
+  for(int i = 0; i < pcIndexBits; i++) {
+    mask =  (mask << 1) + 1;
+  }
+  uint32_t index = pc & mask;
+  if(outcome == TAKEN) {
+    if(*(PHT + *(PHT_map + index)) < ST) {
+      *(PHT + *(PHT_map + index)) += 1;
+    } 
+  }
+  else {
+    if(*(PHT + *(PHT_map + index)) > SN) {
+      *(PHT + *(PHT_map + index)) -= 1;
+    }
+  }
+  //train PHT_map
+  uint32_t mask2 = 0;
+  for(int i = 0; i < lhistoryBits; i++) {
+    mask2 =  (mask2 << 1) + 1;
+  }
+  *(PHT_map + index) = ((*(PHT_map + index) << 1) + outcome) & mask2;
+  return;
+}
+
+void
+Global_train(uint8_t outcome) {
+  uint32_t mask = 0;
+  for(int i = 0; i < ghistoryBits; i++) {
+    mask =  (mask << 1) + 1;
+  }
+  uint32_t index = History & mask;
+  if(outcome == TAKEN) {
+    if(*(BHT_global + index) < ST) {
+      *(BHT_global + index) += 1;
+    } 
+  }
+  else {
+    if(*(BHT_global + index) > SN) {
+      *(BHT_global + index) -= 1;
+    }
+  }
+  return;
+}
+
+void
+Choice_train(uint32_t pc, uint8_t outcome) {
+  uint8_t Local_result = Local_make(pc);
+  uint8_t Global_result = Global_make();
+  uint32_t mask = 0;
+  for(int i = 0; i < ghistoryBits; i++) {
+    mask =  (mask << 1) + 1;
+  }
+  uint32_t index = History & mask;
+  if(Local_result != Global_result) {
+    if(Local_result == outcome) {
+      if(*(Choice + index) < ST) {
+        *(Choice + index) += 1;
+      }
+    }
+    else {
+      if(*(Choice + index) > SN) {
+        *(Choice + index) -= 1;
+      }
+    }
+  }
+  return;
+}
+
+void
+TOURNAMENT_train(uint32_t pc, uint8_t outcome) {
+  Choice_train(pc, outcome);
+  Local_train(pc, outcome);
+  Global_train(outcome);
+  //at last train Global History register
+  History = (History << 1) + outcome;
   return;
 }
 
@@ -143,6 +300,8 @@ train_predictor(uint32_t pc, uint8_t outcome)
       GSHARE_train(pc, outcome);
       break;
     case TOURNAMENT:
+      TOURNAMENT_train(pc, outcome);
+      break;
     case CUSTOM:
     default:
       break;
